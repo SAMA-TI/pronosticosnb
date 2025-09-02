@@ -29,6 +29,14 @@ ENV/
 # Excel/CSV outputs
 *.csv
 
+!Base de datos estaciones SAMA.xlsx
+
+# Ignorar todo lo relacionado con Docker
+Dockerfile
+docker-compose.yml
+*.dockerignore
+__docker__/
+
 
 # Logs
 *.log
