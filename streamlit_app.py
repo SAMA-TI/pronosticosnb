@@ -24,18 +24,83 @@ st.set_page_config(
     layout="wide"
 )
 
-# Configurar session para requests con reintentos
+# Configurar session para requests con reintentos y headers realistas
 def crear_session_requests():
     session = requests.Session()
+    
+    # Headers que simulan un navegador real
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
+    })
+    
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
+        total=2,  # Menos reintentos para evitar rate limiting
+        backoff_factor=2,  # Mayor tiempo entre reintentos
         status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
+# Función de diagnóstico para logging detallado
+def test_conectividad_api():
+    """Test de conectividad detallado para diagnóstico"""
+    import socket
+    import ssl
+    
+    st.info("🔍 Ejecutando test de conectividad...")
+    
+    # Test 1: Resolución DNS
+    try:
+        ip = socket.gethostbyname('sigran.antioquia.gov.co')
+        st.success(f"✅ DNS resuelto: sigran.antioquia.gov.co -> {ip}")
+    except Exception as e:
+        st.error(f"❌ Error DNS: {e}")
+        return False
+    
+    # Test 2: Conexión TCP
+    try:
+        sock = socket.create_connection(('sigran.antioquia.gov.co', 443), timeout=10)
+        sock.close()
+        st.success("✅ Conexión TCP establecida en puerto 443")
+    except Exception as e:
+        st.error(f"❌ Error TCP: {e}")
+        return False
+    
+    # Test 3: Handshake SSL
+    try:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        sock = socket.create_connection(('sigran.antioquia.gov.co', 443), timeout=10)
+        ssl_sock = context.wrap_socket(sock, server_hostname='sigran.antioquia.gov.co')
+        ssl_sock.close()
+        st.success("✅ Handshake SSL exitoso")
+    except Exception as e:
+        st.error(f"❌ Error SSL: {e}")
+        return False
+    
+    # Test 4: Request HTTP simple
+    try:
+        session = crear_session_requests()
+        url = "https://sigran.antioquia.gov.co/api/v1/estaciones/sp_101/"
+        response = session.get(url, verify=False, timeout=15)
+        st.success(f"✅ Request HTTP exitoso: Status {response.status_code}")
+        return True
+    except Exception as e:
+        st.error(f"❌ Error HTTP: {e}")
+        return False
 
 @st.cache_data(ttl=3600)  # Cache por 1 hora
 def cargar_datos():
@@ -50,46 +115,94 @@ def cargar_datos():
         session = crear_session_requests()
         page = 1
         datos = []
-        max_intentos = 3
+        max_intentos = 2
         
         while True:
             url = f"https://sigran.antioquia.gov.co/api/v1/estaciones/sp_{code}/precipitacion?calidad={calidad}&page={page}"
             
+            # Log detallado
+            st.write(f"🔄 Intentando obtener datos de estación {code}, página {page}")
+            
             for intento in range(max_intentos):
                 try:
-                    response = session.get(url, verify=False, timeout=10)
+                    # Delay entre requests para evitar rate limiting
+                    if intento > 0:
+                        time.sleep(3)  # 3 segundos entre reintentos
+                    
+                    response = session.get(url, verify=False, timeout=15)
+                    
+                    # Log del response
+                    st.write(f"📡 Estación {code}: Status {response.status_code}, Headers: {dict(response.headers)}")
+                    
+                    if response.status_code == 429:
+                        st.warning(f"⏳ Rate limit detectado para estación {code}, esperando...")
+                        time.sleep(10)
+                        continue
+                    
                     if response.status_code != 200:
+                        st.warning(f"⚠️ Estación {code}: Status code {response.status_code}")
                         break
+                    
                     data = response.json()
                     values = data.get("values", [])
                     if not values:
+                        st.info(f"✅ Estación {code}: No más datos disponibles")
                         return datos
+                    
                     datos.extend(values)
+                    st.success(f"✅ Estación {code}: {len(values)} registros obtenidos (total: {len(datos)})")
                     break
-                except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
+                    
+                except requests.exceptions.ConnectTimeout as e:
+                    st.error(f"🚫 Timeout de conexión estación {code}, intento {intento + 1}: {str(e)}")
                     if intento == max_intentos - 1:
-                        st.warning(f"Error al obtener datos de estación {code}: {str(e)}")
                         return datos
-                    time.sleep(1)  # Esperar antes del siguiente intento
+                except requests.exceptions.ReadTimeout as e:
+                    st.error(f"🚫 Timeout de lectura estación {code}, intento {intento + 1}: {str(e)}")
+                    if intento == max_intentos - 1:
+                        return datos
+                except requests.exceptions.RequestException as e:
+                    st.error(f"🚫 Error de request estación {code}, intento {intento + 1}: {str(e)}")
+                    if intento == max_intentos - 1:
+                        return datos
+                except Exception as e:
+                    st.error(f"🚫 Error inesperado estación {code}, intento {intento + 1}: {str(e)}")
+                    if intento == max_intentos - 1:
+                        return datos
+                
+                time.sleep(2)  # Delay entre intentos
             else:
                 break
                 
             page += 1
+            time.sleep(1)  # Delay entre páginas
+            
             # Paramos si ya tenemos más de 72 horas de datos
             if datos:
                 fechas = [pd.to_datetime(d['fecha']) for d in datos]
                 if fechas and (max(fechas) - min(fechas)).total_seconds() > 72 * 3600:
                     break
+                    
+            # Límite de páginas para evitar loops infinitos
+            if page > 10:
+                st.warning(f"⚠️ Estación {code}: Límite de páginas alcanzado")
+                break
+                
         return datos
 
     def obtener_metadata_sp(code):
         session = crear_session_requests()
         url = f"https://sigran.antioquia.gov.co/api/v1/estaciones/sp_{code}/"
         
+        st.write(f"🔄 Obteniendo metadata de estación {code}")
+        
         try:
-            resp = session.get(url, verify=False, timeout=10)
+            resp = session.get(url, verify=False, timeout=15)
+            st.write(f"📡 Metadata {code}: Status {resp.status_code}")
+            
             if resp.status_code == 200:
                 d = resp.json()
+                st.success(f"✅ Metadata {code}: Obtenida exitosamente")
                 return {
                     "estacion": code,
                     "codigo": d.get("codigo"),
@@ -100,9 +213,16 @@ def cargar_datos():
                     "municipio": d.get("municipio"),
                     "region": d.get("region")
                 }
-        except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-            st.warning(f"Error al obtener metadata de estación {code}: {str(e)}")
-            return None
+            else:
+                st.warning(f"⚠️ Metadata {code}: Status code {resp.status_code}")
+                
+        except requests.exceptions.ConnectTimeout as e:
+            st.error(f"🚫 Timeout de conexión metadata {code}: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            st.error(f"🚫 Error de request metadata {code}: {str(e)}")
+        except Exception as e:
+            st.error(f"🚫 Error inesperado metadata {code}: {str(e)}")
+            
         return None
 
     def procesar_datos(datos, ahora=None):
@@ -160,7 +280,7 @@ def cargar_datos():
             "serie_120h": serie_120h
         }
 
-    # Procesar datos con paralelización
+    # Procesar datos con paralelización DESACTIVADA para diagnóstico
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -170,39 +290,57 @@ def cargar_datos():
 
     def procesar_estacion(code):
         try:
+            st.write(f"🚀 Iniciando procesamiento de estación {code}")
             datos = obtener_datos_estacion(code)
-            resumen = procesar_datos(datos)
+            
+            if datos:
+                st.write(f"📊 Estación {code}: {len(datos)} registros obtenidos, procesando...")
+                resumen = procesar_datos(datos)
+            else:
+                st.warning(f"⚠️ Estación {code}: Sin datos obtenidos")
+                resumen = None
+            
             meta = obtener_metadata_sp(code)
             
             if resumen and meta:
                 resumen["estacion"] = code
                 meta.update(resumen)
+                st.success(f"✅ Estación {code}: Procesamiento completado exitosamente")
                 return resumen, meta
+            else:
+                st.error(f"❌ Estación {code}: Falló el procesamiento")
+                
         except Exception as e:
-            st.warning(f"Error procesando estación {code}: {str(e)}")
+            st.error(f"🚫 Error crítico procesando estación {code}: {str(e)}")
         return None, None
 
-    # Procesar estaciones en lotes para evitar sobrecarga
-    batch_size = 5
-    completed = 0
+    # Procesar estaciones SECUENCIALMENTE para diagnóstico (sin paralelización)
+    st.info("🔧 Modo diagnóstico: Procesando estaciones secuencialmente...")
     
-    for i in range(0, len(sp_codes), batch_size):
-        batch = sp_codes[i:i + batch_size]
-        status_text.text(f'Procesando lote {i//batch_size + 1}/{math.ceil(len(sp_codes)/batch_size)}...')
+    # Solo procesar las primeras 3 estaciones para el test
+    sp_codes_test = sp_codes[:3]
+    
+    for i, code in enumerate(sp_codes_test):
+        status_text.text(f'🔍 TEST: Procesando estación {code}... ({i+1}/{len(sp_codes_test)})')
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(procesar_estacion, code): code for code in batch}
-            
-            for future in concurrent.futures.as_completed(futures):
-                resumen, meta = future.result()
-                if resumen and meta:
-                    resultados.append(resumen)
-                    metadata.append(meta)
-                completed += 1
-                progress_bar.progress(completed / total_estaciones)
+        resumen, meta = procesar_estacion(code)
+        if resumen and meta:
+            resultados.append(resumen)
+            metadata.append(meta)
+        
+        progress_bar.progress((i + 1) / len(sp_codes_test))
+        
+        # Delay entre estaciones para evitar rate limiting
+        if i < len(sp_codes_test) - 1:
+            st.info("⏱️ Esperando 5 segundos antes de la siguiente estación...")
+            time.sleep(5)
 
     progress_bar.empty()
     status_text.empty()
+    
+    if not metadata:
+        st.error("❌ No se pudieron obtener datos de ninguna estación en modo test")
+        raise Exception("Fallo completo en modo diagnóstico")
 
     df_meta = pd.DataFrame(metadata)
 
@@ -449,6 +587,19 @@ st.title("🌧️ Tablero de estaciones de precipitación")
 # Agregar un healthcheck simple
 if st.query_params.get("health") == "check":
     st.write("OK")
+    st.stop()
+
+# Modo de diagnóstico
+if st.query_params.get("debug") == "true":
+    st.title("🔧 Modo Diagnóstico - Test de Conectividad")
+    st.info("Ejecutando tests de conectividad detallados...")
+    
+    # Test de conectividad
+    if test_conectividad_api():
+        st.success("🎉 Todos los tests de conectividad pasaron!")
+    else:
+        st.error("❌ Algunos tests de conectividad fallaron")
+    
     st.stop()
 
 # Cargar datos
