@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.manifest
+*.spec
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Excel/CSV outputs
+*.csv
+*.xlsx
+
+# Logs
+*.log
+
+# Otros
+*.tmp
+*.bak
+
+# Git
+.git/

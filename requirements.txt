@@ -1,0 +1,9 @@
+# requirements.txt
+# Agrega aquí los paquetes necesarios para tu proyecto
+notebook
+ipykernel
+pandas
+numpy
+streamlit
+openpyxl
+plotly
