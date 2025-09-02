@@ -28,7 +28,7 @@ ENV/
 
 # Excel/CSV outputs
 *.csv
-*.xlsx
+
 
 # Logs
 *.log
